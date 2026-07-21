@@ -148,12 +148,16 @@ function initDatabase(): void
     $db->exec('CREATE TABLE IF NOT EXISTS esg_checklist_items (
         id INT AUTO_INCREMENT PRIMARY KEY,
         framework VARCHAR(10) NOT NULL,
-        item_code VARCHAR(20) NOT NULL,
+        item_code VARCHAR(50) NOT NULL,
         item_text VARCHAR(255) NOT NULL,
         status VARCHAR(20) NOT NULL DEFAULT "open",
         notes VARCHAR(500) DEFAULT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    // Migratie: item_code was aanvankelijk VARCHAR(20), te kort voor rijen zonder
+    // officiële framework-code (bv. "Dubbele materialiteitsanalyse"). Idempotent.
+    $db->exec('ALTER TABLE esg_checklist_items MODIFY COLUMN item_code VARCHAR(50) NOT NULL');
 
     $db->exec('CREATE TABLE IF NOT EXISTS esg_custom_kpis (
         id INT AUTO_INCREMENT PRIMARY KEY,
