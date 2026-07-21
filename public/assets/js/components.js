@@ -68,15 +68,21 @@
     });
   }
 
-  /* --- Password visibility toggle --- */
+  /* --- Password visibility toggle (SVG-iconen, geen emoji) --- */
+  var HZ_ICON_EYE = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var HZ_ICON_EYE_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0112 20c-7 0-11-8-11-8a19.9 19.9 0 015.06-6.06M9.9 4.24A9.5 9.5 0 0112 4c7 0 11 8 11 8a19.86 19.86 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  window.hzIcon = function (key) {
+    return { eye: HZ_ICON_EYE, "eye-off": HZ_ICON_EYE_OFF }[key] || "";
+  };
   function initPasswordToggles() {
     qsa("[data-hz-password-toggle]").forEach(function (btn) {
       var input = document.getElementById(btn.getAttribute("data-hz-password-toggle"));
       if (!input) return;
+      btn.innerHTML = HZ_ICON_EYE;
       btn.addEventListener("click", function () {
         var isPw = input.type === "password";
         input.type = isPw ? "text" : "password";
-        btn.textContent = isPw ? "🙈" : "👁";
+        btn.innerHTML = isPw ? HZ_ICON_EYE_OFF : HZ_ICON_EYE;
       });
     });
   }

@@ -116,7 +116,7 @@
 .hz-checkbox { border-radius:4px; }
 .hz-radio { border-radius:50%; }
 .hz-checkbox:checked, .hz-radio:checked { background:var(--hz-primary); border-color:var(--hz-primary); }
-.hz-checkbox:checked::after { content:"✓"; color:#fff; font-size:12px; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+.hz-checkbox:checked::after { content:""; position:absolute; left:4px; top:1px; width:5px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(40deg); }
 .hz-radio:checked::after { content:""; position:absolute; inset:4px; background:#fff; border-radius:50%; }
 
 .hz-dropzone { border:2px dashed var(--hz-border); border-radius:var(--hz-radius); padding:2rem; text-align:center; color:var(--hz-text-muted); cursor:pointer; }
@@ -208,6 +208,10 @@
 .hz-dropdown__menu.hz-is-open { display:block; }
 .hz-dropdown__menu button, .hz-dropdown__menu a { display:block; width:100%; text-align:left; padding:.55rem .9rem; border:none; background:none; font-size:.85rem; color:var(--hz-text); cursor:pointer; text-decoration:none; }
 .hz-dropdown__menu button:hover, .hz-dropdown__menu a:hover { background:var(--hz-bg); }
+
+/* Iconen (inline SVG i.p.v. emoji) */
+.hz-icon { display:inline-block; vertical-align:-3px; flex-shrink:0; }
+button .hz-icon, a .hz-icon { vertical-align:-4px; margin-right:.35rem; }
 
 /* Utility */
 .hz-container { max-width:1200px; margin:0 auto; padding:0 1.5rem; }

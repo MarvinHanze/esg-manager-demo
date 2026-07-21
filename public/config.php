@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/assets/icons.php';
+
 define('BASE', '/esg-manager');
 define('DEMO_RESET_MINUTES', 30);
 
