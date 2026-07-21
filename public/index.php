@@ -4,84 +4,40 @@ declare(strict_types=1);
 
 session_start();
 require __DIR__ . '/config.php';
+require __DIR__ . '/partials.php';
 
 initDatabase();
 requireLogin();
 
 $db = getDb();
-$action  = $_POST['action'] ?? $_GET['action'] ?? 'list';
-$editId  = (int) ($_GET['edit'] ?? 0);
+$currentUser = getUser();
 $message = '';
 $msgType = 'success';
 
-// ── Handle POST actions ──────────────────────────────────────────────
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $csrfToken = $_POST['csrf_token'] ?? '';
-    if (!hash_equals($_SESSION['csrf_token'] ?? '', $csrfToken)) {
+// ── Mobiele veldnotitie (incidenten/observaties direct vanaf de vloer) ──
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'create_note') {
+    if (!csrfOk()) {
         $message = 'Ongeldige aanvraag.';
         $msgType = 'error';
     } else {
-        if ($action === 'create' || $action === 'update') {
-            $category   = trim((string) ($_POST['category'] ?? ''));
-            $metricName = trim((string) ($_POST['metric_name'] ?? ''));
-            $value      = (float) ($_POST['value'] ?? 0);
-            $unit       = trim((string) ($_POST['unit'] ?? ''));
-            $target     = (float) ($_POST['target_value'] ?? 0);
-            $period     = trim((string) ($_POST['period'] ?? ''));
-
-            if ($category === '' || $metricName === '') {
-                $message = 'Categorie en metric naam zijn verplicht.';
-                $msgType = 'error';
-            } else {
-                if ($action === 'create') {
-                    $stmt = $db->prepare(
-                        'INSERT INTO esg_metrics (category, metric_name, value, unit, target_value, period) VALUES (?, ?, ?, ?, ?, ?)'
-                    );
-                    $stmt->execute([$category, $metricName, $value, $unit, $target, $period]);
-                    $message = 'Metric toegevoegd.';
-                } elseif ($action === 'update') {
-                    $updateId = (int) ($_POST['id'] ?? 0);
-                    if ($updateId > 0) {
-                        $stmt = $db->prepare(
-                            'UPDATE esg_metrics SET category=?, metric_name=?, value=?, unit=?, target_value=?, period=? WHERE id=?'
-                        );
-                        $stmt->execute([$category, $metricName, $value, $unit, $target, $period, $updateId]);
-                        $message = 'Metric bijgewerkt.';
-                    }
-                }
-            }
-        } elseif ($action === 'delete') {
-            $deleteId = (int) ($_POST['id'] ?? 0);
-            if ($deleteId > 0) {
-                $stmt = $db->prepare('DELETE FROM esg_metrics WHERE id = ?');
-                $stmt->execute([$deleteId]);
-                $message = 'Metric verwijderd.';
-            }
+        $noteCategory = trim((string) ($_POST['note_category'] ?? ''));
+        $noteText     = trim((string) ($_POST['note'] ?? ''));
+        if ($noteCategory === '' || $noteText === '') {
+            $message = 'Categorie en notitie zijn verplicht.';
+            $msgType = 'error';
+        } else {
+            $stmt = $db->prepare('INSERT INTO esg_field_notes (category, note, reported_by) VALUES (?, ?, ?)');
+            $stmt->execute([$noteCategory, $noteText, $currentUser['name']]);
+            auditLog('create', 'field_note', (int) $db->lastInsertId(), $noteCategory);
+            $message = 'Veldnotitie geregistreerd.';
         }
     }
-    $editId = 0;
 }
 
-// ── CSRF token ───────────────────────────────────────────────────────
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
+// ── Aggregaten ───────────────────────────────────────────────────────
+$metrics = $db->query('SELECT * FROM esg_metrics ORDER BY category, metric_name')->fetchAll();
 
-// ── Fetch data ───────────────────────────────────────────────────────
-$search = trim((string) ($_GET['q'] ?? ''));
-if ($search !== '') {
-    $stmt = $db->prepare(
-        'SELECT * FROM esg_metrics WHERE category LIKE ? OR metric_name LIKE ? ORDER BY category, metric_name'
-    );
-    $like = '%' . $search . '%';
-    $stmt->execute([$like, $like]);
-} else {
-    $stmt = $db->query('SELECT * FROM esg_metrics ORDER BY category, metric_name');
-}
-$metrics = $stmt->fetchAll();
-
-// ── Aggregates for stat cards ────────────────────────────────────────
-function sumByCategory(array $metrics, string $cat, string $unit): string
+function sumByCategory(array $metrics, string $cat, string $unit): float
 {
     $total = 0.0;
     foreach ($metrics as $m) {
@@ -89,7 +45,12 @@ function sumByCategory(array $metrics, string $cat, string $unit): string
             $total += (float) $m['value'];
         }
     }
-    if ($total >= 1000) {
+    return $total;
+}
+
+function fmtTotal(float $total): string
+{
+    if (abs($total) >= 1000) {
         return number_format($total / 1000, 1, ',', '.') . 'k';
     }
     return number_format($total, 0, ',', '.');
@@ -100,393 +61,270 @@ $energyTotal = sumByCategory($metrics, 'Energie', 'kWh');
 $waterTotal  = sumByCategory($metrics, 'Water', 'L');
 $wasteTotal  = sumByCategory($metrics, 'Afval', 'kg');
 
-// ── Edit data ────────────────────────────────────────────────────────
-$editData = null;
-if ($editId > 0) {
-    $stmt = $db->prepare('SELECT * FROM esg_metrics WHERE id = ?');
-    $stmt->execute([$editId]);
-    $editData = $stmt->fetch();
-    if ($editData !== false) {
-        $action = 'update';
+$categories = ['Energie', 'Water', 'Afval', 'Mobiliteit', 'Sociaal', 'Governance'];
+$progressByCategory = [];
+foreach ($categories as $cat) {
+    $sumVal = 0.0;
+    $sumTarget = 0.0;
+    foreach ($metrics as $m) {
+        if ($m['category'] === $cat && (float) $m['target_value'] !== 0.0) {
+            $sumVal += (float) $m['value'];
+            $sumTarget += (float) $m['target_value'];
+        }
+    }
+    $progressByCategory[$cat] = $sumTarget > 0 ? min(100, round(($sumVal / $sumTarget) * 100, 1)) : 0;
+}
+
+// ── Trendreeks over periodes voor de belangrijkste indicatoren ───────
+$periodOrder = ['Q3 2025', 'Q4 2025', 'Q1 2026'];
+$trendMetricNames = [
+    'Energie'    => 'Totaal CO2 besparing',
+    'Water'      => 'Water recycling percentage',
+    'Sociaal'    => 'Medewerkerstevredenheid score',
+    'Governance' => 'Onafhankelijke bestuursleden',
+];
+$trendSeries = [];
+foreach ($trendMetricNames as $cat => $name) {
+    $values = array_fill_keys($periodOrder, null);
+    foreach ($metrics as $m) {
+        if ($m['category'] === $cat && $m['metric_name'] === $name && in_array($m['period'], $periodOrder, true)) {
+            $values[$m['period']] = (float) $m['value'];
+        }
+    }
+    $trendSeries[$cat] = ['name' => $name, 'values' => array_values($values)];
+}
+
+// ── Alerts: rapportagedeadline + KPI-overschrijding ───────────────────
+$stmt = $db->prepare('SELECT setting_value FROM esg_settings WHERE setting_key = ?');
+$stmt->execute(['report_deadline']);
+$deadline = $stmt->fetchColumn();
+$daysLeft = $deadline !== false ? (int) ceil((strtotime((string) $deadline) - time()) / 86400) : null;
+
+$kpiOverruns = 0;
+foreach ($metrics as $m) {
+    $target = (float) $m['target_value'];
+    if ($target > 0) {
+        $progress = ((float) $m['value'] / $target) * 100;
+        if ($progress < 50) {
+            $kpiOverruns++;
+        }
     }
 }
 
-// ── Categories ───────────────────────────────────────────────────────
-$categories = ['Energie', 'Water', 'Afval', 'Mobiliteit'];
+$pendingApproval = 0;
+foreach ($metrics as $m) {
+    if ($m['status'] === 'ter_goedkeuring') {
+        $pendingApproval++;
+    }
+}
 
-$currentUser = getUser();
+// ── Recente veldnotities & auditlog (voor compliance/admin) ──────────
+$fieldNotes = $db->query('SELECT * FROM esg_field_notes ORDER BY created_at DESC LIMIT 5')->fetchAll();
+$recentAudit = [];
+if (in_array($currentUser['role'], ['admin', 'compliance_officer'], true)) {
+    $recentAudit = $db->query('SELECT * FROM esg_audit_log ORDER BY id DESC LIMIT 6')->fetchAll();
+}
+
+$checklistTotals = $db->query(
+    "SELECT framework, SUM(status='gereed') AS gereed, COUNT(*) AS totaal FROM esg_checklist_items GROUP BY framework"
+)->fetchAll();
+
+renderPageStart('Dashboard', 'index');
+renderFlash($message, $msgType);
 ?>
-<!DOCTYPE html>
-<html lang="nl" class="h-full">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESG Manager — Duurzaamheidsdashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        brand: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669', 700: '#047857' },
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        .modal-backdrop { background: rgba(0,0,0,0.4); }
-    </style>
-</head>
-<body class="h-full bg-slate-50 text-slate-800 antialiased">
 
-<!-- ── Nav ─────────────────────────────────────────────────────── -->
-<nav class="bg-white shadow-sm border-b border-slate-200">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="flex items-center justify-between h-16">
-            <div class="flex items-center gap-3">
-                <svg class="w-8 h-8 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2z"/>
-                    <path d="M12 6c-2 0-4 2-4 5s2 5 4 5c1 0 2.5-1 3-2.5"/>
-                    <path d="M12 6v-2M16 8l1.5-1M17 12h2M16 16l1.5 1"/>
-                    <path d="M12 18v2M8 16l-1.5 1M7 12H5M8 8L6.5 7"/>
-                </svg>
-                <h1 class="text-xl font-bold text-slate-900 tracking-tight">ESG Manager</h1>
-            </div>
-            <div class="flex items-center gap-4">
-                <span class="text-sm text-slate-500 hidden sm:block"><?= htmlspecialchars($currentUser['email']) ?></span>
-                <a href="<?= BASE ?>/logout.php"
-                   class="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-red-600 transition-colors">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
-                    </svg>
-                    Uitloggen
-                </a>
-            </div>
+<!-- ── Alerts ─────────────────────────────────────────────────────── -->
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+    <?php if ($daysLeft !== null): ?>
+        <div class="flex items-center gap-3 px-4 py-3 rounded-lg border <?= $daysLeft <= 21 ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-600' ?>">
+            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            <p class="text-sm"><strong>Rapportagedeadline:</strong> <?= e((string) $deadline) ?>
+                (<?= $daysLeft >= 0 ? $daysLeft . ' dagen resterend' : 'verstreken' ?>)</p>
         </div>
+    <?php endif; ?>
+    <div class="flex items-center gap-3 px-4 py-3 rounded-lg border <?= $kpiOverruns > 0 ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800' ?>">
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        <p class="text-sm"><strong><?= $kpiOverruns ?> metric<?= $kpiOverruns === 1 ? '' : 's' ?></strong> onder 50% van de doelstelling.</p>
     </div>
-</nav>
+</div>
 
-<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-
-<!-- ── Flash message ──────────────────────────────────────────── -->
-<?php if ($message !== ''): ?>
-    <div class="mb-6 px-4 py-3 rounded-lg text-sm font-medium <?= $msgType === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-brand-50 text-brand-700 border border-brand-200' ?>">
-        <?= htmlspecialchars($message) ?>
-    </div>
-<?php endif; ?>
-
-<!-- ── Stat cards ─────────────────────────────────────────────── -->
+<!-- ── Stat cards ─────────────────────────────────────────────────── -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-        <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center">
-                <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945"/>
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 2a10 10 0 100 20 10 10 0 000-20z"/>
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2"/>
-                </svg>
-            </div>
-            <p class="text-sm font-medium text-slate-500">Totaal CO2 Besparing</p>
-        </div>
-        <p class="text-3xl font-bold text-slate-900"><?= $co2Total ?></p>
+    <div class="hz-card hz-card--stat">
+        <p class="hz-card__label">Totaal CO2 Besparing</p>
+        <p class="hz-card__value"><?= fmtTotal($co2Total) ?></p>
         <p class="text-sm text-slate-500 mt-1">kilogram CO2</p>
     </div>
-
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-        <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
-                <svg class="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-            </div>
-            <p class="text-sm font-medium text-slate-500">Energie Bespaard</p>
-        </div>
-        <p class="text-3xl font-bold text-slate-900"><?= $energyTotal ?></p>
+    <div class="hz-card hz-card--stat">
+        <p class="hz-card__label">Energie Bespaard</p>
+        <p class="hz-card__value"><?= fmtTotal($energyTotal) ?></p>
         <p class="text-sm text-slate-500 mt-1">kilowattuur</p>
     </div>
-
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-        <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-sky-50 flex items-center justify-center">
-                <svg class="w-5 h-5 text-sky-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3c-4.97 0-9 3.19-9 7.13 0 2.82 2.03 5.24 4.97 6.37-.13-.89-.25-2.25.03-3.36.27-1.07.84-2 1.66-2.63C10.64 9.8 11.3 9.5 12 9.5s1.36.3 2.34 1.01c.82.63 1.39 1.56 1.66 2.63.28 1.11.16 2.47.03 3.36 2.94-1.13 4.97-3.55 4.97-6.37C21 6.19 16.97 3 12 3z"/>
-                </svg>
-            </div>
-            <p class="text-sm font-medium text-slate-500">Water Teruggewonnen</p>
-        </div>
-        <p class="text-3xl font-bold text-slate-900"><?= $waterTotal ?></p>
+    <div class="hz-card hz-card--stat">
+        <p class="hz-card__label">Water Teruggewonnen</p>
+        <p class="hz-card__value"><?= fmtTotal($waterTotal) ?></p>
         <p class="text-sm text-slate-500 mt-1">liter</p>
     </div>
-
-    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-        <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-violet-50 flex items-center justify-center">
-                <svg class="w-5 h-5 text-violet-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v16h16V4H4zm4 4h8M8 12h8M8 16h5"/>
-                </svg>
-            </div>
-            <p class="text-sm font-medium text-slate-500">Afval Gerecycled</p>
-        </div>
-        <p class="text-3xl font-bold text-slate-900"><?= $wasteTotal ?></p>
+    <div class="hz-card hz-card--stat">
+        <p class="hz-card__label">Afval Gerecycled</p>
+        <p class="hz-card__value"><?= fmtTotal($wasteTotal) ?></p>
         <p class="text-sm text-slate-500 mt-1">kilogram</p>
     </div>
 </div>
 
-<!-- ── Toolbar ────────────────────────────────────────────────── -->
-<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
-    <form method="get" class="flex items-center gap-2 w-full sm:w-auto">
-        <div class="relative flex-1 sm:flex-none">
-            <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                <circle cx="11" cy="11" r="8"/><path stroke-linecap="round" d="M21 21l-4.35-4.35"/>
-            </svg>
-            <input type="text" name="q" value="<?= htmlspecialchars($search) ?>"
-                   placeholder="Zoek metrics..."
-                   class="w-full sm:w-72 pl-10 pr-4 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none">
+<!-- ── Rol-specifiek paneel ───────────────────────────────────────── -->
+<?php if ($currentUser['role'] === 'compliance_officer'): ?>
+<div class="hz-card mb-8 border-l-4 border-amber-400">
+    <div class="hz-card__header"><h2 class="text-base font-semibold text-slate-900">Compliance-officer overzicht</h2></div>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div>
+            <p class="text-2xl font-bold text-amber-600"><?= $pendingApproval ?></p>
+            <p class="text-sm text-slate-500">metrics wachten op goedkeuring — <a href="<?= BASE ?>/metrics.php" class="text-brand-600 underline">bekijk in Data-invoer</a></p>
         </div>
-        <button type="submit" class="px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors">
-            Zoek
-        </button>
-    </form>
-    <button onclick="openModal('create')"
-            class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-brand-500 rounded-lg hover:bg-brand-600 transition-colors shadow-sm">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-            <path stroke-linecap="round" d="M12 5v14M5 12h14"/>
-        </svg>
-        Nieuwe Metric
-    </button>
+        <?php foreach ($checklistTotals as $c): ?>
+        <div>
+            <p class="text-2xl font-bold text-slate-900"><?= (int) $c['gereed'] ?>/<?= (int) $c['totaal'] ?></p>
+            <p class="text-sm text-slate-500"><?= e($c['framework']) ?> checklist gereed</p>
+        </div>
+        <?php endforeach; ?>
+    </div>
 </div>
+<?php elseif ($currentUser['role'] === 'admin'): ?>
+<div class="hz-card mb-8 border-l-4 border-red-400">
+    <div class="hz-card__header"><h2 class="text-base font-semibold text-slate-900">Beheerdersoverzicht</h2></div>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+        <div>
+            <p class="text-2xl font-bold text-amber-600"><?= $pendingApproval ?></p>
+            <p class="text-sm text-slate-500">metrics ter goedkeuring</p>
+        </div>
+        <div>
+            <p class="text-2xl font-bold text-slate-900"><?= count($metrics) ?></p>
+            <p class="text-sm text-slate-500">totaal aantal metrics</p>
+        </div>
+        <div>
+            <a href="<?= BASE ?>/settings.php" class="hz-btn hz-btn--secondary">Beheer & audit trail</a>
+        </div>
+    </div>
+    <?php if ($recentAudit): ?>
+    <p class="text-xs font-semibold text-slate-400 uppercase mb-2">Recente audit trail</p>
+    <ul class="text-sm divide-y divide-slate-100">
+        <?php foreach ($recentAudit as $a): ?>
+        <li class="py-1.5 flex justify-between gap-2">
+            <span class="text-slate-600"><?= e($a['actor']) ?> — <?= e($a['action']) ?> (<?= e($a['entity']) ?>)</span>
+            <span class="text-slate-400 shrink-0"><?= e($a['created_at']) ?></span>
+        </li>
+        <?php endforeach; ?>
+    </ul>
+    <?php endif; ?>
+</div>
+<?php else: ?>
+<div class="hz-card mb-8 border-l-4 border-emerald-400">
+    <div class="hz-card__header"><h2 class="text-base font-semibold text-slate-900">Milieumanager overzicht</h2></div>
+    <p class="text-sm text-slate-600">Je hebt <strong><?= $pendingApproval ?></strong> metric(s) ingediend die nog op goedkeuring wachten van de compliance officer.
+        Ga naar <a href="<?= BASE ?>/metrics.php" class="text-brand-600 underline">Data-invoer</a> om nieuwe metingen toe te voegen via de wizard.</p>
+</div>
+<?php endif; ?>
 
-<!-- ── Data table ─────────────────────────────────────────────── -->
-<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-    <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-            <thead>
-                <tr class="border-b border-slate-200 bg-slate-50">
-                    <th class="px-6 py-3 text-left font-semibold text-slate-600">Categorie</th>
-                    <th class="px-6 py-3 text-left font-semibold text-slate-600">Metric</th>
-                    <th class="px-6 py-3 text-right font-semibold text-slate-600">Waarde</th>
-                    <th class="px-6 py-3 text-left font-semibold text-slate-600">Eenheid</th>
-                    <th class="px-6 py-3 text-right font-semibold text-slate-600">Doel</th>
-                    <th class="px-6 py-3 text-right font-semibold text-slate-600">Voortgang</th>
-                    <th class="px-6 py-3 text-right font-semibold text-slate-600">Acties</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-100">
-            <?php if (empty($metrics)): ?>
-                <tr>
-                    <td colspan="7" class="px-6 py-12 text-center text-slate-400">
-                        Geen metrics gevonden.
-                    </td>
-                </tr>
-            <?php else: ?>
-                <?php foreach ($metrics as $m): ?>
-                    <?php
-                    $progress = 0;
-                    if ((float) $m['target_value'] > 0) {
-                        $progress = min(100, round(((float) $m['value'] / (float) $m['target_value']) * 100));
-                    }
-                    $barColor = $progress >= 100 ? 'bg-emerald-500' : ($progress >= 60 ? 'bg-amber-400' : 'bg-red-400');
-                    ?>
-                    <tr class="hover:bg-slate-50 transition-colors">
-                        <td class="px-6 py-4">
-                            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
-                                <?php
-                                switch ($m['category']) {
-                                    case 'Energie':   echo 'bg-amber-50 text-amber-700'; break;
-                                    case 'Water':     echo 'bg-sky-50 text-sky-700'; break;
-                                    case 'Afval':     echo 'bg-violet-50 text-violet-700'; break;
-                                    case 'Mobiliteit': echo 'bg-emerald-50 text-emerald-700'; break;
-                                    default:           echo 'bg-slate-100 text-slate-700'; break;
-                                }
-                                ?>">
-                                <?= htmlspecialchars($m['category']) ?>
-                            </span>
-                        </td>
-                        <td class="px-6 py-4 font-medium text-slate-900"><?= htmlspecialchars($m['metric_name']) ?></td>
-                        <td class="px-6 py-4 text-right tabular-nums"><?= number_format((float) $m['value'], 2, ',', '.') ?></td>
-                        <td class="px-6 py-4 text-slate-500"><?= htmlspecialchars($m['unit']) ?></td>
-                        <td class="px-6 py-4 text-right tabular-nums text-slate-500"><?= number_format((float) $m['target_value'], 2, ',', '.') ?></td>
-                        <td class="px-6 py-4 w-32">
-                            <div class="flex items-center gap-2">
-                                <div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-                                    <div class="h-full <?= $barColor ?> rounded-full transition-all" style="width: <?= $progress ?>%"></div>
-                                </div>
-                                <span class="text-xs text-slate-500 tabular-nums w-10 text-right"><?= $progress ?>%</span>
-                            </div>
-                        </td>
-                        <td class="px-6 py-4 text-right">
-                            <div class="flex items-center justify-end gap-2">
-                                <button onclick="openModal('edit', <?= (int) $m['id'] ?>)"
-                                        class="p-1.5 rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
-                                        title="Bewerk">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                                    </svg>
-                                </button>
-                                <form method="post" class="inline"
-                                      onsubmit="return confirm('Weet je zeker dat je deze metric wilt verwijderen?')">
-                                    <input type="hidden" name="action" value="delete">
-                                    <input type="hidden" name="id" value="<?= (int) $m['id'] ?>">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
-                                    <button type="submit"
-                                            class="p-1.5 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                                            title="Verwijder">
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                                        </svg>
-                                    </button>
-                                </form>
-                            </div>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            <?php endif; ?>
-            </tbody>
-        </table>
+<!-- ── Grafieken ──────────────────────────────────────────────────── -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <div class="hz-card">
+        <div class="hz-card__header">
+            <h2 class="text-base font-semibold text-slate-900">Trendanalyse (laatste 3 kwartalen)</h2>
+        </div>
+        <canvas id="trendChart" height="220"></canvas>
+    </div>
+    <div class="hz-card">
+        <div class="hz-card__header">
+            <h2 class="text-base font-semibold text-slate-900">Voortgang per categorie t.o.v. doel</h2>
+        </div>
+        <canvas id="progressChart" height="220"></canvas>
     </div>
 </div>
 
-<!-- ── Footer ─────────────────────────────────────────────────── -->
-<footer class="mt-12 pb-8 text-center text-sm text-slate-400">
-    ESG Manager Demo &middot; PHP 8.2 + Apache + MySQL
-</footer>
-
-</main>
-
-<!-- ── Modal ──────────────────────────────────────────────────── -->
-<div id="modal" class="fixed inset-0 z-50 hidden items-center justify-center modal-backdrop" style="display:none;">
-    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 overflow-hidden">
-        <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-            <h2 id="modal-title" class="text-lg font-semibold text-slate-900">Nieuwe Metric</h2>
-            <button onclick="closeModal()" class="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" d="M6 18L18 6M6 6l12 12"/>
-                </svg>
-            </button>
+<!-- ── Mobiele veldnotitie ────────────────────────────────────────── -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <div class="hz-card">
+        <div class="hz-card__header">
+            <h2 class="text-base font-semibold text-slate-900">Veldnotitie registreren</h2>
         </div>
-        <form id="modal-form" method="post" class="p-6 space-y-4">
-            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
-            <input type="hidden" name="action" id="form-action" value="create">
-            <input type="hidden" name="id" id="form-id" value="0">
-
+        <p class="text-sm text-slate-500 mb-3">Mobiel-vriendelijk formulier om direct vanaf de locatie een observatie of incident vast te leggen.</p>
+        <form method="post" class="space-y-3">
+            <?= csrfField() ?>
+            <input type="hidden" name="action" value="create_note">
             <div>
-                <label for="form-category" class="block text-sm font-medium text-slate-700 mb-1">Categorie</label>
-                <select name="category" id="form-category" required
-                        class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none">
+                <label class="block text-sm font-medium text-slate-700 mb-1">Categorie <span class="text-red-500">*</span></label>
+                <select name="note_category" required class="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 outline-none">
                     <?php foreach ($categories as $cat): ?>
-                        <option value="<?= htmlspecialchars($cat) ?>"><?= htmlspecialchars($cat) ?></option>
+                        <option value="<?= e($cat) ?>"><?= e($cat) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
-
             <div>
-                <label for="form-metric-name" class="block text-sm font-medium text-slate-700 mb-1">Metric naam</label>
-                <input type="text" name="metric_name" id="form-metric-name" required
-                       class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
-                       placeholder="bijv. KWh bespaard">
+                <label class="block text-sm font-medium text-slate-700 mb-1">Notitie <span class="text-red-500">*</span></label>
+                <textarea name="note" required rows="3" placeholder="bijv. lekkage bij leiding hal 3"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 outline-none"></textarea>
             </div>
-
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label for="form-value" class="block text-sm font-medium text-slate-700 mb-1">Waarde</label>
-                    <input type="number" name="value" id="form-value" step="0.01" value="0"
-                           class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none">
-                </div>
-                <div>
-                    <label for="form-unit" class="block text-sm font-medium text-slate-700 mb-1">Eenheid</label>
-                    <input type="text" name="unit" id="form-unit"
-                           class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
-                           placeholder="bijv. kWh, kg, L">
-                </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label for="form-target" class="block text-sm font-medium text-slate-700 mb-1">Doelwaarde</label>
-                    <input type="number" name="target_value" id="form-target" step="0.01" value="0"
-                           class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none">
-                </div>
-                <div>
-                    <label for="form-period" class="block text-sm font-medium text-slate-700 mb-1">Periode</label>
-                    <input type="text" name="period" id="form-period"
-                           class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
-                           placeholder="bijv. Q1 2026">
-                </div>
-            </div>
-
-            <div class="flex items-center justify-end gap-3 pt-4 border-t border-slate-200">
-                <button type="button" onclick="closeModal()"
-                        class="px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors">
-                    Annuleren
-                </button>
-                <button type="submit"
-                        class="px-5 py-2 text-sm font-semibold text-white bg-brand-500 rounded-lg hover:bg-brand-600 transition-colors shadow-sm">
-                    Opslaan
-                </button>
-            </div>
+            <button type="submit" class="hz-btn hz-btn--primary w-full sm:w-auto">Registreren</button>
         </form>
+    </div>
+    <div class="hz-card">
+        <div class="hz-card__header"><h2 class="text-base font-semibold text-slate-900">Recente veldnotities</h2></div>
+        <?php if (!$fieldNotes): ?>
+            <p class="text-sm text-slate-400">Nog geen veldnotities geregistreerd.</p>
+        <?php else: ?>
+            <ul class="divide-y divide-slate-100 text-sm">
+                <?php foreach ($fieldNotes as $n): ?>
+                <li class="py-2">
+                    <div class="flex items-center justify-between gap-2 mb-0.5">
+                        <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium <?= categoryBadgeClass($n['category']) ?>"><?= e($n['category']) ?></span>
+                        <span class="text-xs text-slate-400"><?= e($n['created_at']) ?></span>
+                    </div>
+                    <p class="text-slate-700"><?= e($n['note']) ?></p>
+                    <p class="text-xs text-slate-400">door <?= e((string) $n['reported_by']) ?></p>
+                </li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
     </div>
 </div>
 
+<footer class="mt-4 pb-8 text-center text-sm text-slate-400">
+    ESG Manager Demo &middot; PHP 8.2 + Apache + MySQL
+</footer>
+
 <script>
-function openModal(mode, id) {
-    var modal = document.getElementById('modal');
-    var title = document.getElementById('modal-title');
-    var formAction = document.getElementById('form-action');
-    var formId = document.getElementById('form-id');
+const trendLabels = <?= json_encode($periodOrder) ?>;
+const trendDatasets = <?= json_encode(array_map(fn($s) => ['label' => $s['name'], 'data' => $s['values']], array_values($trendSeries))) ?>;
+const trendColors = ['#059669', '#0284c7', '#db2777', '#7c3aed'];
+new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: {
+        labels: trendLabels,
+        datasets: trendDatasets.map((d, i) => ({
+            label: d.label, data: d.data, borderColor: trendColors[i % trendColors.length],
+            backgroundColor: trendColors[i % trendColors.length], tension: 0.3, spanGaps: true,
+        }))
+    },
+    options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } } } }
+});
 
-    if (mode === 'edit' && id) {
-        title.textContent = 'Metric Bewerken';
-        formAction.value = 'update';
-        formId.value = id;
-        // Redirect to load metric data for editing
-        window.location.href = '<?= BASE ?>/index.php?edit=' + id;
-        return;
+const progressLabels = <?= json_encode(array_keys($progressByCategory)) ?>;
+const progressValues = <?= json_encode(array_values($progressByCategory)) ?>;
+new Chart(document.getElementById('progressChart'), {
+    type: 'bar',
+    data: {
+        labels: progressLabels,
+        datasets: [
+            { label: '% van doel behaald', data: progressValues, backgroundColor: '#10b981' },
+            { label: 'Restant tot doel', data: progressValues.map(v => Math.max(0, 100 - v)), backgroundColor: '#e2e8f0' },
+        ]
+    },
+    options: {
+        indexAxis: 'y', responsive: true,
+        scales: { x: { stacked: true, max: 100 }, y: { stacked: true } },
+        plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } } }
     }
-
-    title.textContent = 'Nieuwe Metric';
-    formAction.value = 'create';
-    formId.value = '0';
-    document.getElementById('form-category').value = 'Energie';
-    document.getElementById('form-metric-name').value = '';
-    document.getElementById('form-value').value = '0';
-    document.getElementById('form-unit').value = '';
-    document.getElementById('form-target').value = '0';
-    document.getElementById('form-period').value = '';
-
-    modal.style.display = 'flex';
-}
-
-function closeModal() {
-    document.getElementById('modal').style.display = 'none';
-}
-
-// Close modal on backdrop click
-document.getElementById('modal').addEventListener('click', function(e) {
-    if (e.target === this) closeModal();
 });
 </script>
 
-<?php if ($editData !== null): ?>
-<script>
-(function() {
-    var modal = document.getElementById('modal');
-    var title = document.getElementById('modal-title');
-    title.textContent = 'Metric Bewerken';
-    document.getElementById('form-action').value = 'update';
-    document.getElementById('form-id').value = '<?= (int) $editData['id'] ?>';
-    document.getElementById('form-category').value = <?= json_encode($editData['category']) ?>;
-    document.getElementById('form-metric-name').value = <?= json_encode($editData['metric_name']) ?>;
-    document.getElementById('form-value').value = <?= json_encode($editData['value']) ?>;
-    document.getElementById('form-unit').value = <?= json_encode($editData['unit']) ?>;
-    document.getElementById('form-target').value = <?= json_encode($editData['target_value']) ?>;
-    document.getElementById('form-period').value = <?= json_encode($editData['period']) ?>;
-    modal.style.display = 'flex';
-})();
-</script>
-<?php endif; ?>
-
-</body>
-</html>
+<?php renderPageEnd(); ?>

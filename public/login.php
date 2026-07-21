@@ -31,9 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['user_id']    = (int) $user['id'];
             $_SESSION['user_email'] = (string) $user['email'];
             $_SESSION['user_name']  = (string) $user['name'];
-            $db = getDb();
-            $db->exec('DELETE FROM esg_metrics');
-            seedDemoData();
+            $_SESSION['user_role']  = (string) $user['role'];
             header('Location: ' . BASE . '/index.php');
             exit;
         }
@@ -105,9 +103,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </form>
     </div>
 
-    <p class="mt-6 text-center text-xs text-slate-400">
-        Demo inlog: admin@demo.nl / demo123
-    </p>
+    <div class="mt-6 text-center text-xs text-slate-400 space-y-0.5">
+        <p>Demo-accounts (wachtwoord voor alle drie: <strong>demo123</strong>)</p>
+        <p>admin@demo.nl &middot; milieu@demo.nl &middot; compliance@demo.nl</p>
+    </div>
 </div>
 
 </body>

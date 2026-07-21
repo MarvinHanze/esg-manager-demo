@@ -11,6 +11,36 @@ define('DB_USER', 'mysql');
 define('DB_PASS', '23ns613Dyo1vgiAOQCt2ABFZzujOsxuyROvqNk4unUoZxWpwN9nIPrMNTt4QFkzG');
 
 /**
+ * Vaste sectorgemiddelde-constanten (demo-benchmarks). Bewust hardcoded en
+ * niet database-gestuurd: dit zijn "vaste" referentiewaarden zoals gevraagd,
+ * geen door gebruikers te muteren records.
+ */
+const SECTOR_BENCHMARKS = [
+    'Energie'     => ['label' => 'CO2-besparing (sectorgemiddelde)',            'value' => 8000.0,  'unit' => 'kg'],
+    'Water'       => ['label' => 'Waterhergebruik (sectorgemiddelde)',           'value' => 15000.0, 'unit' => 'L'],
+    'Afval'       => ['label' => 'Afvalscheiding (sectorgemiddelde)',            'value' => 300.0,   'unit' => 'kg'],
+    'Mobiliteit'  => ['label' => 'CO2-reductie mobiliteit (sectorgemiddelde)',   'value' => 900.0,   'unit' => 'kg'],
+    'Sociaal'     => ['label' => 'Medewerkerstevredenheid (sectorgemiddelde)',   'value' => 7.2,     'unit' => 'score /10'],
+    'Governance'  => ['label' => 'Onafhankelijke bestuursleden (sectorgemiddelde)', 'value' => 45.0, 'unit' => '%'],
+];
+
+/**
+ * Uitleg van vakjargon voor de hz-tooltip componenten.
+ */
+const ESG_GLOSSARY = [
+    'scope1'     => 'Scope 1: directe emissies uit bronnen die het bedrijf zelf bezit of beheert (bijv. eigen wagenpark, gasverwarming).',
+    'scope2'     => 'Scope 2: indirecte emissies door de opwekking van ingekochte energie (elektriciteit, stadswarmte).',
+    'scope3'     => 'Scope 3: alle overige indirecte emissies in de waardeketen (leveranciers, zakenreizen, woon-werkverkeer, afval).',
+    'scopes'     => 'Scope 1 = directe emissies, Scope 2 = ingekochte energie, Scope 3 = overige waardeketen-emissies (GHG Protocol-indeling).',
+    'csrd'       => 'CSRD (Corporate Sustainability Reporting Directive): EU-richtlijn die bedrijven verplicht om uitgebreid te rapporteren over duurzaamheid.',
+    'gri'        => 'GRI (Global Reporting Initiative): internationale standaard voor duurzaamheidsverslaggeving, gericht op impact op mens, milieu en economie.',
+    'sasb'       => 'SASB (Sustainability Accounting Standards Board): sectorspecifieke standaarden gericht op financieel materiële ESG-onderwerpen.',
+    'esrs'       => 'ESRS (European Sustainability Reporting Standards): de gedetailleerde rapportagestandaarden die onder de CSRD worden gebruikt.',
+    'materialiteit' => 'Dubbele materialiteit: het beoordelen van zowel de impact van het bedrijf op mens/milieu, als de impact van ESG-risico\'s op het bedrijf zelf.',
+    'kpi'        => 'KPI (Key Performance Indicator): een meetbare indicator die aangeeft hoe goed een doelstelling wordt behaald.',
+];
+
+/**
  * Create a PDO database connection.
  */
 function getDb(): PDO
@@ -28,6 +58,26 @@ function getDb(): PDO
 }
 
 /**
+ * HTML-escape helper.
+ */
+function e(?string $value): string
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+/**
+ * Check whether a column already exists on a table (for safe incremental ALTERs).
+ */
+function columnExists(PDO $db, string $table, string $column): bool
+{
+    $stmt = $db->prepare(
+        'SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?'
+    );
+    $stmt->execute([$table, $column]);
+    return (int) $stmt->fetchColumn() > 0;
+}
+
+/**
  * Initialize database tables and auto-reset demo data.
  */
 function initDatabase(): void
@@ -38,12 +88,30 @@ function initDatabase(): void
         id INT AUTO_INCREMENT PRIMARY KEY,
         category VARCHAR(50) NOT NULL,
         metric_name VARCHAR(100) NOT NULL,
-        value DECIMAL(10,2) DEFAULT 0,
+        value DECIMAL(12,2) DEFAULT 0,
         unit VARCHAR(20),
-        target_value DECIMAL(10,2) DEFAULT 0,
+        target_value DECIMAL(12,2) DEFAULT 0,
         period VARCHAR(20),
+        scope VARCHAR(20) DEFAULT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT "concept",
+        submitted_by VARCHAR(100) DEFAULT NULL,
+        approved_by VARCHAR(100) DEFAULT NULL,
+        approved_at TIMESTAMP NULL DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    // Incremental column additions for environments where the table pre-existed.
+    foreach ([
+        'scope'        => 'ALTER TABLE esg_metrics ADD COLUMN scope VARCHAR(20) DEFAULT NULL',
+        'status'       => 'ALTER TABLE esg_metrics ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT "concept"',
+        'submitted_by' => 'ALTER TABLE esg_metrics ADD COLUMN submitted_by VARCHAR(100) DEFAULT NULL',
+        'approved_by'  => 'ALTER TABLE esg_metrics ADD COLUMN approved_by VARCHAR(100) DEFAULT NULL',
+        'approved_at'  => 'ALTER TABLE esg_metrics ADD COLUMN approved_at TIMESTAMP NULL DEFAULT NULL',
+    ] as $col => $sql) {
+        if (!columnExists($db, 'esg_metrics', $col)) {
+            $db->exec($sql);
+        }
+    }
 
     $db->exec('CREATE TABLE IF NOT EXISTS esg_settings (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -55,15 +123,97 @@ function initDatabase(): void
         id INT AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(100) NOT NULL UNIQUE,
         password VARCHAR(255) NOT NULL,
-        name VARCHAR(100) NOT NULL
+        name VARCHAR(100) NOT NULL,
+        role VARCHAR(30) NOT NULL DEFAULT "milieumanager"
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
 
-    // Seed default user if not exists
-    $stmt = $db->prepare('SELECT COUNT(*) FROM esg_users WHERE email = ?');
-    $stmt->execute(['admin@demo.nl']);
-    if ((int) $stmt->fetchColumn() === 0) {
-        $stmt = $db->prepare('INSERT INTO esg_users (email, password, name) VALUES (?, ?, ?)');
-        $stmt->execute(['admin@demo.nl', password_hash('demo123', PASSWORD_DEFAULT), 'Admin']);
+    if (!columnExists($db, 'esg_users', 'role')) {
+        $db->exec('ALTER TABLE esg_users ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT "milieumanager"');
+    }
+
+    // Onwijzigbare audit trail: alleen INSERT-statements raken deze tabel ooit aan.
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_audit_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        actor VARCHAR(150) NOT NULL,
+        role VARCHAR(30) NOT NULL,
+        action VARCHAR(50) NOT NULL,
+        entity VARCHAR(50) NOT NULL,
+        entity_id INT DEFAULT NULL,
+        details VARCHAR(500) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_checklist_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        framework VARCHAR(10) NOT NULL,
+        item_code VARCHAR(20) NOT NULL,
+        item_text VARCHAR(255) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT "open",
+        notes VARCHAR(500) DEFAULT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_custom_kpis (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        category VARCHAR(30) NOT NULL,
+        unit VARCHAR(20) DEFAULT NULL,
+        current_value DECIMAL(12,2) DEFAULT 0,
+        previous_value DECIMAL(12,2) DEFAULT NULL,
+        target_value DECIMAL(12,2) DEFAULT NULL,
+        created_by VARCHAR(100) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_stakeholders (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        organisation VARCHAR(150) DEFAULT NULL,
+        email VARCHAR(150) DEFAULT NULL,
+        category VARCHAR(30) DEFAULT "Overig",
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_email_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        stakeholder_id INT DEFAULT NULL,
+        recipient_label VARCHAR(150) DEFAULT NULL,
+        subject VARCHAR(200) NOT NULL,
+        body TEXT,
+        sent_by VARCHAR(100) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_integration_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        integration_name VARCHAR(50) NOT NULL,
+        action VARCHAR(30) NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        details VARCHAR(255) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_field_notes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        category VARCHAR(50) NOT NULL,
+        note VARCHAR(500) NOT NULL,
+        reported_by VARCHAR(100) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+
+    // Seed default users (drie rollen) if not exists
+    $demoUsers = [
+        ['admin@demo.nl',      'demo123', 'Aisha admin',                'admin'],
+        ['milieu@demo.nl',     'demo123', 'Milan milieumanager',        'milieumanager'],
+        ['compliance@demo.nl', 'demo123', 'Carla compliance officer',   'compliance_officer'],
+    ];
+    foreach ($demoUsers as [$email, $pw, $name, $role]) {
+        $stmt = $db->prepare('SELECT COUNT(*) FROM esg_users WHERE email = ?');
+        $stmt->execute([$email]);
+        if ((int) $stmt->fetchColumn() === 0) {
+            $stmt = $db->prepare('INSERT INTO esg_users (email, password, name, role) VALUES (?, ?, ?, ?)');
+            $stmt->execute([$email, password_hash($pw, PASSWORD_DEFAULT), $name, $role]);
+        }
     }
 
     // Auto-reset check
@@ -86,46 +236,154 @@ function initDatabase(): void
         $db->exec('DELETE FROM esg_settings WHERE setting_key = "last_reset"');
         $stmt = $db->prepare('INSERT INTO esg_settings (setting_key, setting_value) VALUES ("last_reset", ?)');
         $stmt->execute([(string) time()]);
+
+        // Rapportagedeadline-instelling alleen initialiseren als hij nog niet bestaat.
+        $stmt = $db->prepare('SELECT COUNT(*) FROM esg_settings WHERE setting_key = ?');
+        $stmt->execute(['report_deadline']);
+        if ((int) $stmt->fetchColumn() === 0) {
+            $stmt = $db->prepare('INSERT INTO esg_settings (setting_key, setting_value) VALUES ("report_deadline", ?)');
+            $stmt->execute([date('Y-m-d', strtotime('+18 days'))]);
+        }
     }
 }
 
 /**
- * Seed demo data with ~20 sustainability metrics.
+ * Seed demo data: milieu-, sociale- en governance-metrics over meerdere periodes
+ * (zodat trendanalyse en de template-gebaseerde "AI"-toelichting echte verschillen
+ * kunnen berekenen), plus checklists, stakeholders en custom KPI's.
  */
 function seedDemoData(): void
 {
     $db = getDb();
     $db->exec('DELETE FROM esg_metrics');
+    $db->exec('DELETE FROM esg_checklist_items');
+    $db->exec('DELETE FROM esg_custom_kpis');
+    $db->exec('DELETE FROM esg_stakeholders');
 
+    // ── Actuele periode (Q1 2026) — status wisselend voor demonstratie van het goedkeuringsproces
     $metrics = [
-        ['Energie', 'KWh bespaard door LED-verlichting',      12500.00, 'kWh', 15000.00, 'Q1 2026'],
-        ['Energie', 'CO2 reductie zonnepanelen',               8200.00,  'kg',  10000.00, 'Q1 2026'],
-        ['Energie', 'Zonnepanelen opwek',                     45000.00, 'kWh', 50000.00, 'Q1 2026'],
-        ['Energie', 'Gasbesparing isolatie',                    320.00,  'm3',  400.00,   'Q1 2026'],
-        ['Energie', 'Totaal CO2 besparing',                    9500.00, 'kg',  12000.00, 'Q1 2026'],
-        ['Water',   'Water bespaard door regenwater',          18000.00, 'L',   25000.00, 'Q1 2026'],
-        ['Water',   'Water hergebruik spoelwater',              7500.00, 'L',   10000.00, 'Q1 2026'],
-        ['Water',   'Water recycling percentage',                  68.50, '%',    80.00,  'Q1 2026'],
-        ['Water',   'Leidingwater reductie',                    2100.00, 'L',   3000.00,  'Q1 2026'],
-        ['Afval',   'Papier en karton gerecycled',               420.00, 'kg',  500.00,   'Q1 2026'],
-        ['Afval',   'Plastic en metaal gerecycled',              180.00, 'kg',  250.00,   'Q1 2026'],
-        ['Afval',   'Elektronisch afval ingeleverd',              35.00, 'kg',   50.00,   'Q1 2026'],
-        ['Afval',   'Stortplaats reductie',                     -15.00, '%',   -20.00,  'Q1 2026'],
-        ['Afval',   'GFT-afval gescheiden',                     210.00, 'kg',  300.00,   'Q1 2026'],
-        ['Mobiliteit', 'Elektrische voertuig ritten',             342.00, 'trips', 500.00, 'Q1 2026'],
-        ['Mobiliteit', 'Fiets forens kilometers',               4800.00, 'km',  6000.00,  'Q1 2026'],
-        ['Mobiliteit', 'Openbaar vervoer gebruikt',              185.00, 'trips', 250.00, 'Q1 2026'],
-        ['Mobiliteit', 'CO2 reductie mobiliteit',               1200.00, 'kg',  1500.00,  'Q1 2026'],
-        ['Mobiliteit', 'Deelauto ritten',                         78.00, 'trips', 100.00, 'Q1 2026'],
+        ['Energie', 'KWh bespaard door LED-verlichting',      12500.00, 'kWh', 15000.00, 'Q1 2026', 'Scope 2', 'goedgekeurd'],
+        ['Energie', 'CO2 reductie zonnepanelen',               8200.00,  'kg',  10000.00, 'Q1 2026', 'Scope 2', 'goedgekeurd'],
+        ['Energie', 'Zonnepanelen opwek',                     45000.00, 'kWh', 50000.00, 'Q1 2026', 'Scope 2', 'goedgekeurd'],
+        ['Energie', 'Gasbesparing isolatie',                    320.00,  'm3',  400.00,   'Q1 2026', 'Scope 1', 'ter_goedkeuring'],
+        ['Energie', 'Totaal CO2 besparing',                    9500.00, 'kg',  12000.00, 'Q1 2026', 'Scope 1', 'goedgekeurd'],
+        ['Water',   'Water bespaard door regenwater',          18000.00, 'L',   25000.00, 'Q1 2026', null, 'goedgekeurd'],
+        ['Water',   'Water hergebruik spoelwater',              7500.00, 'L',   10000.00, 'Q1 2026', null, 'goedgekeurd'],
+        ['Water',   'Water recycling percentage',                  68.50, '%',    80.00,  'Q1 2026', null, 'concept'],
+        ['Water',   'Leidingwater reductie',                    2100.00, 'L',   3000.00,  'Q1 2026', null, 'goedgekeurd'],
+        ['Afval',   'Papier en karton gerecycled',               420.00, 'kg',  500.00,   'Q1 2026', null, 'goedgekeurd'],
+        ['Afval',   'Plastic en metaal gerecycled',              180.00, 'kg',  250.00,   'Q1 2026', null, 'ter_goedkeuring'],
+        ['Afval',   'Elektronisch afval ingeleverd',              35.00, 'kg',   50.00,   'Q1 2026', null, 'goedgekeurd'],
+        ['Afval',   'Stortplaats reductie',                     -15.00, '%',   -20.00,  'Q1 2026', null, 'goedgekeurd'],
+        ['Afval',   'GFT-afval gescheiden',                     210.00, 'kg',  300.00,   'Q1 2026', null, 'concept'],
+        ['Mobiliteit', 'Elektrische voertuig ritten',             342.00, 'trips', 500.00, 'Q1 2026', 'Scope 3', 'goedgekeurd'],
+        ['Mobiliteit', 'Fiets forens kilometers',               4800.00, 'km',  6000.00,  'Q1 2026', 'Scope 3', 'goedgekeurd'],
+        ['Mobiliteit', 'Openbaar vervoer gebruikt',              185.00, 'trips', 250.00, 'Q1 2026', 'Scope 3', 'goedgekeurd'],
+        ['Mobiliteit', 'CO2 reductie mobiliteit',               1200.00, 'kg',  1500.00,  'Q1 2026', 'Scope 3', 'goedgekeurd'],
+        ['Mobiliteit', 'Deelauto ritten',                         78.00, 'trips', 100.00, 'Q1 2026', 'Scope 3', 'ter_goedkeuring'],
+        ['Sociaal', 'Medewerkerstevredenheid score',                7.60, 'score /10', 8.00, 'Q1 2026', null, 'goedgekeurd'],
+        ['Sociaal', 'Verzuimpercentage',                            3.80, '%',   3.00,   'Q1 2026', null, 'goedgekeurd'],
+        ['Sociaal', 'Diversiteit vrouw/man in leidinggevende rollen', 42.00, '%', 50.00, 'Q1 2026', null, 'concept'],
+        ['Sociaal', 'Trainingsuren per medewerker',                 14.50, 'uur', 20.00,  'Q1 2026', null, 'goedgekeurd'],
+        ['Governance', 'Onafhankelijke bestuursleden',              38.00, '%',   45.00,  'Q1 2026', null, 'goedgekeurd'],
+        ['Governance', 'Voltooide anti-corruptietrainingen',        88.00, '%',   100.00, 'Q1 2026', null, 'goedgekeurd'],
+        ['Governance', 'Klokkenluidersmeldingen afgehandeld',      100.00, '%',   100.00, 'Q1 2026', null, 'goedgekeurd'],
+        ['Governance', 'Data-privacy incidenten',                     2.00, 'aantal', 0.00, 'Q1 2026', null, 'ter_goedkeuring'],
     ];
 
     $stmt = $db->prepare(
-        'INSERT INTO esg_metrics (category, metric_name, value, unit, target_value, period) VALUES (?, ?, ?, ?, ?, ?)'
+        'INSERT INTO esg_metrics (category, metric_name, value, unit, target_value, period, scope, status, submitted_by, approved_by, approved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
-
     foreach ($metrics as $m) {
-        $stmt->execute($m);
+        [$cat, $name, $val, $unit, $target, $period, $scope, $status] = $m;
+        $submittedBy = $status !== 'concept' ? 'Milan milieumanager' : null;
+        $approvedBy  = $status === 'goedgekeurd' ? 'Carla compliance officer' : null;
+        $approvedAt  = $status === 'goedgekeurd' ? date('Y-m-d H:i:s', strtotime('-3 days')) : null;
+        $stmt->execute([$cat, $name, $val, $unit, $target, $period, $scope, $status, $submittedBy, $approvedBy, $approvedAt]);
     }
+
+    // ── Historische periodes (t.b.v. trendanalyse / AI-toelichting / grafieken) — direct goedgekeurd
+    $history = [
+        // categorie, metric_name, waarde, eenheid, doel, periode
+        ['Energie', 'Totaal CO2 besparing', 7100.00, 'kg', 12000.00, 'Q3 2025'],
+        ['Energie', 'Totaal CO2 besparing', 8300.00, 'kg', 12000.00, 'Q4 2025'],
+        ['Water', 'Water recycling percentage', 61.00, '%', 80.00, 'Q3 2025'],
+        ['Water', 'Water recycling percentage', 64.20, '%', 80.00, 'Q4 2025'],
+        ['Afval', 'Stortplaats reductie', -9.00, '%', -20.00, 'Q3 2025'],
+        ['Afval', 'Stortplaats reductie', -12.00, '%', -20.00, 'Q4 2025'],
+        ['Sociaal', 'Medewerkerstevredenheid score', 7.10, 'score /10', 8.00, 'Q3 2025'],
+        ['Sociaal', 'Medewerkerstevredenheid score', 7.30, 'score /10', 8.00, 'Q4 2025'],
+        ['Governance', 'Onafhankelijke bestuursleden', 33.00, '%', 45.00, 'Q3 2025'],
+        ['Governance', 'Onafhankelijke bestuursleden', 35.50, '%', 45.00, 'Q4 2025'],
+    ];
+    foreach ($history as $h) {
+        [$cat, $name, $val, $unit, $target, $period] = $h;
+        $stmt->execute([$cat, $name, $val, $unit, $target, $period, null, 'goedgekeurd', 'Milan milieumanager', 'Carla compliance officer', date('Y-m-d H:i:s', strtotime('-90 days'))]);
+    }
+
+    // ── Framework-checklists (CSRD / GRI / SASB)
+    $checklist = [
+        ['CSRD', 'ESRS E1', 'Klimaatverandering: broeikasgasemissies (scope 1/2/3) gerapporteerd', 'gereed'],
+        ['CSRD', 'ESRS E3', 'Water- en mariene hulpbronnen in kaart gebracht', 'in_uitvoering'],
+        ['CSRD', 'ESRS E5', 'Circulaire economie: afvalstromen en materiaalgebruik', 'in_uitvoering'],
+        ['CSRD', 'ESRS S1', 'Eigen personeel: arbeidsomstandigheden en gelijke behandeling', 'gereed'],
+        ['CSRD', 'ESRS G1', 'Ondernemingsgedrag: anti-corruptiebeleid', 'open'],
+        ['CSRD', 'Dubbele materialiteitsanalyse', 'Materialiteitsanalyse uitgevoerd en gedocumenteerd', 'gereed'],
+        ['GRI', 'GRI 302', 'Energieverbruik binnen de organisatie', 'gereed'],
+        ['GRI', 'GRI 303', 'Water en effluenten', 'in_uitvoering'],
+        ['GRI', 'GRI 305', 'Emissies (scope 1, 2 en 3)', 'gereed'],
+        ['GRI', 'GRI 401', 'Werkgelegenheid en personeelsverloop', 'open'],
+        ['GRI', 'GRI 405', 'Diversiteit en gelijke kansen', 'in_uitvoering'],
+        ['GRI', 'GRI 205', 'Anti-corruptiebeleid en -training', 'open'],
+        ['SASB', 'Energiebeheer', 'Sectorspecifieke energie-indicatoren gerapporteerd', 'gereed'],
+        ['SASB', 'Personeelsbeheer', 'Materiële arbeidsindicatoren voor de sector', 'in_uitvoering'],
+        ['SASB', 'Databeveiliging & privacy', 'Incidentregistratie en mitigatie', 'open'],
+        ['SASB', 'Bedrijfsethiek', 'Klokkenluidersregeling gedocumenteerd', 'gereed'],
+    ];
+    $stmt2 = $db->prepare('INSERT INTO esg_checklist_items (framework, item_code, item_text, status) VALUES (?, ?, ?, ?)');
+    foreach ($checklist as $c) {
+        $stmt2->execute($c);
+    }
+
+    // ── Voorbeeld custom KPI's
+    $kpis = [
+        ['CO2-uitstoot per FTE', 'Energie', 'kg/FTE', 410.00, 460.00, 350.00, 'Aisha admin'],
+        ['Werknemerstevredenheid (NPS)', 'Sociaal', 'score /10', 7.60, 7.30, 8.50, 'Milan milieumanager'],
+        ['% vrouwen in management', 'Governance', '%', 42.00, 38.00, 50.00, 'Carla compliance officer'],
+    ];
+    $stmt3 = $db->prepare(
+        'INSERT INTO esg_custom_kpis (name, category, unit, current_value, previous_value, target_value, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    foreach ($kpis as $k) {
+        $stmt3->execute($k);
+    }
+
+    // ── Voorbeeld stakeholders
+    $stakeholders = [
+        ['Groenfonds Investeringen', 'Groenfonds BV', 'contact@groenfonds-demo.nl', 'Investeerder'],
+        ['Omgevingsdienst Noord', 'Provincie', 'info@omgevingsdienst-demo.nl', 'Toezichthouder'],
+        ['Stichting Duurzaam Werk', 'NGO', 'contact@duurzaamwerk-demo.nl', 'NGO'],
+        ['Ondernemingsraad', 'Intern', 'or@bedrijf-demo.nl', 'Medewerkers'],
+    ];
+    $stmt4 = $db->prepare('INSERT INTO esg_stakeholders (name, organisation, email, category) VALUES (?, ?, ?, ?)');
+    foreach ($stakeholders as $s) {
+        $stmt4->execute($s);
+    }
+}
+
+/**
+ * Onwijzigbare audit trail: enige toegestane operatie op esg_audit_log is INSERT.
+ * Er bestaat bewust geen updateAuditLog()/deleteAuditLog() functie.
+ */
+function auditLog(string $action, string $entity, ?int $entityId = null, ?string $details = null): void
+{
+    $db = getDb();
+    $user = getUser();
+    $stmt = $db->prepare(
+        'INSERT INTO esg_audit_log (actor, role, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+    $stmt->execute([$user['name'] !== '' ? $user['name'] : $user['email'], $user['role'], $action, $entity, $entityId, $details]);
 }
 
 /**
@@ -148,16 +406,63 @@ function requireLogin(): void
 }
 
 /**
+ * RBAC: sta alleen de opgegeven rollen toe, anders 403.
+ */
+function requireRole(array $allowedRoles): void
+{
+    requireLogin();
+    if (!in_array(currentRole(), $allowedRoles, true)) {
+        http_response_code(403);
+        echo '<!DOCTYPE html><html lang="nl"><head><meta charset="UTF-8"><title>Geen toegang</title>'
+            . '<script src="https://cdn.tailwindcss.com"></script></head>'
+            . '<body class="min-h-screen flex items-center justify-center bg-slate-50">'
+            . '<div class="text-center"><p class="text-2xl font-bold text-slate-900 mb-2">403 — Geen toegang</p>'
+            . '<p class="text-slate-500 mb-4">Deze pagina vereist een andere rol (least-privilege RBAC).</p>'
+            . '<a href="' . BASE . '/index.php" class="text-emerald-600 font-medium">Terug naar dashboard</a></div></body></html>';
+        exit;
+    }
+}
+
+/**
  * Get current user data from session.
  */
 function getUser(): array
 {
     if (!isLoggedIn()) {
-        return ['id' => 0, 'email' => '', 'name' => 'Gast'];
+        return ['id' => 0, 'email' => '', 'name' => 'Gast', 'role' => 'gast'];
     }
     return [
         'id'    => (int) ($_SESSION['user_id'] ?? 0),
         'email' => (string) ($_SESSION['user_email'] ?? ''),
         'name'  => (string) ($_SESSION['user_name'] ?? 'Admin'),
+        'role'  => (string) ($_SESSION['user_role'] ?? 'milieumanager'),
     ];
+}
+
+function currentRole(): string
+{
+    return (string) ($_SESSION['user_role'] ?? 'milieumanager');
+}
+
+/**
+ * Nederlandse label + badge-kleur per rol.
+ */
+function roleLabel(string $role): string
+{
+    return match ($role) {
+        'admin'              => 'Beheerder',
+        'milieumanager'      => 'Milieumanager',
+        'compliance_officer' => 'Compliance officer',
+        default              => ucfirst($role),
+    };
+}
+
+function roleBadgeClass(string $role): string
+{
+    return match ($role) {
+        'admin'              => 'hz-badge--red',
+        'milieumanager'      => 'hz-badge--green',
+        'compliance_officer' => 'hz-badge--orange',
+        default              => 'hz-badge--gray',
+    };
 }
