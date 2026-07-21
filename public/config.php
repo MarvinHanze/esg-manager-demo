@@ -214,12 +214,14 @@ function initDatabase(): void
         ['compliance@demo.nl', 'demo123', 'Carla compliance officer',   'compliance_officer'],
     ];
     foreach ($demoUsers as [$email, $pw, $name, $role]) {
-        $stmt = $db->prepare('SELECT COUNT(*) FROM esg_users WHERE email = ?');
-        $stmt->execute([$email]);
-        if ((int) $stmt->fetchColumn() === 0) {
-            $stmt = $db->prepare('INSERT INTO esg_users (email, password, name, role) VALUES (?, ?, ?, ?)');
-            $stmt->execute([$email, password_hash($pw, PASSWORD_DEFAULT), $name, $role]);
-        }
+        // ON DUPLICATE KEY UPDATE zorgt dat rol/naam zichzelf herstellen als een
+        // eerdere deploy per ongeluk een afwijkende rol voor dit demo-account had
+        // aangemaakt (data-drift-bescherming, wachtwoord blijft ongewijzigd).
+        $stmt = $db->prepare(
+            'INSERT INTO esg_users (email, password, name, role) VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE name = VALUES(name), role = VALUES(role)'
+        );
+        $stmt->execute([$email, password_hash($pw, PASSWORD_DEFAULT), $name, $role]);
     }
 
     // Auto-reset check
