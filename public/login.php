@@ -31,6 +31,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['user_id']    = (int) $user['id'];
             $_SESSION['user_email'] = (string) $user['email'];
             $_SESSION['user_name']  = (string) $user['name'];
+            $db = getDb();
+            $db->exec('DELETE FROM esg_metrics');
+            seedDemoData();
             header('Location: ' . BASE . '/index.php');
             exit;
         }
