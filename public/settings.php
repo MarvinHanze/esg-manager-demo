@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-session_start();
 require __DIR__ . '/config.php';
 require __DIR__ . '/partials.php';
+initSession();
 
 initDatabase();
 requireRole(['admin']);

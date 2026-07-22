@@ -4,8 +4,31 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/assets/icons.php';
 
+// ── Foutafhandeling: nooit ruwe stack traces / SQL-tekst naar de browser ──
+// (wel loggen server-side, zodat er nog steeds te debuggen valt).
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL);
+
+set_exception_handler(function (Throwable $e): void {
+    error_log('Onafgevangen exception: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+    if (!headers_sent()) {
+        http_response_code(500);
+    }
+    echo '<!DOCTYPE html><html lang="nl"><head><meta charset="UTF-8"><title>Er ging iets mis</title>'
+        . '<script src="https://cdn.tailwindcss.com"></script></head>'
+        . '<body class="min-h-screen flex items-center justify-center bg-slate-50">'
+        . '<div class="text-center px-4"><p class="text-2xl font-bold text-slate-900 mb-2">Er is een onverwachte fout opgetreden</p>'
+        . '<p class="text-slate-500 mb-4">Probeer het later opnieuw. Het technische detail is server-side gelogd.</p>'
+        . '<a href="' . BASE . '/index.php" class="text-emerald-600 font-medium">Terug naar dashboard</a></div></body></html>';
+    exit;
+});
+
 define('BASE', '/esg-manager');
 define('DEMO_RESET_MINUTES', 30);
+define('LOGIN_MAX_ATTEMPTS', 5);
+define('LOGIN_LOCKOUT_MINUTES', 15);
 
 define('DB_HOST', 'y11ovnrne4yk4p9zbhe39tti');
 define('DB_NAME', 'demos');
@@ -65,6 +88,28 @@ function getDb(): PDO
 function e(?string $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+/**
+ * Start de sessie met veilige cookie-instellingen (httponly + samesite).
+ * Moet vóór elk gebruik van $_SESSION aangeroepen worden; idempotent (mag
+ * meerdere keren aangeroepen worden dankzij de session_status()-check).
+ */
+function initSession(): void
+{
+    if (session_status() === PHP_SESSION_NONE) {
+        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+        session_set_cookie_params([
+            'lifetime' => 0,
+            'path'     => '/',
+            'domain'   => '',
+            'secure'   => $isHttps,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+        session_start();
+    }
 }
 
 /**
@@ -132,6 +177,13 @@ function initDatabase(): void
     if (!columnExists($db, 'esg_users', 'role')) {
         $db->exec('ALTER TABLE esg_users ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT "milieumanager"');
     }
+
+    // Brute-force-bescherming op inloggen: mislukte pogingen per e-mailadres.
+    $db->exec('CREATE TABLE IF NOT EXISTS esg_login_attempts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(100) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
 
     // Onwijzigbare audit trail: alleen INSERT-statements raken deze tabel ooit aan.
     $db->exec('CREATE TABLE IF NOT EXISTS esg_audit_log (
@@ -241,17 +293,24 @@ function initDatabase(): void
 
     if ($shouldReset) {
         seedDemoData();
-        $db->exec('DELETE FROM esg_settings WHERE setting_key = "last_reset"');
-        $stmt = $db->prepare('INSERT INTO esg_settings (setting_key, setting_value) VALUES ("last_reset", ?)');
+
+        // ON DUPLICATE KEY UPDATE i.p.v. DELETE+INSERT: atomisch en dus veilig
+        // als twee requests de reset-drempel tegelijk overschrijden (anders kan
+        // de tweede INSERT falen op de unique constraint van setting_key nadat
+        // de eerste al heeft ge-DELETE-en/INSERT, en de reset half laten slagen).
+        $stmt = $db->prepare(
+            'INSERT INTO esg_settings (setting_key, setting_value) VALUES ("last_reset", ?)
+             ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)'
+        );
         $stmt->execute([(string) time()]);
 
-        // Rapportagedeadline-instelling alleen initialiseren als hij nog niet bestaat.
-        $stmt = $db->prepare('SELECT COUNT(*) FROM esg_settings WHERE setting_key = ?');
-        $stmt->execute(['report_deadline']);
-        if ((int) $stmt->fetchColumn() === 0) {
-            $stmt = $db->prepare('INSERT INTO esg_settings (setting_key, setting_value) VALUES ("report_deadline", ?)');
-            $stmt->execute([date('Y-m-d', strtotime('+18 days'))]);
-        }
+        // Rapportagedeadline-instelling alleen initialiseren als hij nog niet bestaat
+        // (bestaande, door een beheerder ingestelde deadline nooit overschrijven).
+        $stmt = $db->prepare(
+            'INSERT INTO esg_settings (setting_key, setting_value) VALUES ("report_deadline", ?)
+             ON DUPLICATE KEY UPDATE setting_value = setting_value'
+        );
+        $stmt->execute([date('Y-m-d', strtotime('+18 days'))]);
     }
 }
 
@@ -378,6 +437,49 @@ function seedDemoData(): void
     foreach ($stakeholders as $s) {
         $stmt4->execute($s);
     }
+}
+
+/**
+ * Brute-force-bescherming: is dit e-mailadres momenteel geblokkeerd na te veel
+ * mislukte inlogpogingen? Retourneert het aantal resterende minuten (0 = niet
+ * geblokkeerd).
+ */
+function loginLockoutMinutesLeft(string $email): int
+{
+    $db = getDb();
+    $stmt = $db->prepare(
+        'SELECT COUNT(*), MAX(created_at) FROM esg_login_attempts
+         WHERE email = ? AND created_at >= (NOW() - INTERVAL ? MINUTE)'
+    );
+    $stmt->execute([$email, LOGIN_LOCKOUT_MINUTES]);
+    [$count, $lastAttempt] = $stmt->fetch(PDO::FETCH_NUM);
+    $count = (int) $count;
+    if ($count < LOGIN_MAX_ATTEMPTS || $lastAttempt === null) {
+        return 0;
+    }
+    $elapsedMinutes = (time() - strtotime((string) $lastAttempt)) / 60;
+    $remaining = (int) ceil(LOGIN_LOCKOUT_MINUTES - $elapsedMinutes);
+    return max(0, $remaining);
+}
+
+/**
+ * Registreer een mislukte inlogpoging voor dit e-mailadres.
+ */
+function recordFailedLogin(string $email): void
+{
+    $db = getDb();
+    $stmt = $db->prepare('INSERT INTO esg_login_attempts (email) VALUES (?)');
+    $stmt->execute([$email]);
+}
+
+/**
+ * Wis mislukte pogingen na een geslaagde login.
+ */
+function clearFailedLogins(string $email): void
+{
+    $db = getDb();
+    $stmt = $db->prepare('DELETE FROM esg_login_attempts WHERE email = ?');
+    $stmt->execute([$email]);
 }
 
 /**

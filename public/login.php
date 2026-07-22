@@ -2,8 +2,9 @@
 
 declare(strict_types=1);
 
-session_start();
 require __DIR__ . '/config.php';
+require __DIR__ . '/partials.php';
+initSession();
 
 initDatabase();
 
@@ -15,28 +16,36 @@ if (isLoggedIn()) {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email    = trim((string) ($_POST['email'] ?? ''));
-    $password = (string) ($_POST['password'] ?? '');
-
-    if ($email === '' || $password === '') {
-        $error = 'Vul alle velden in.';
+    if (!csrfOk()) {
+        $error = 'Ongeldige aanvraag. Ververs de pagina en probeer opnieuw.';
     } else {
-        $db = getDb();
-        $stmt = $db->prepare('SELECT * FROM esg_users WHERE email = ? LIMIT 1');
-        $stmt->execute([$email]);
-        $user = $stmt->fetch();
+        $email    = trim((string) ($_POST['email'] ?? ''));
+        $password = (string) ($_POST['password'] ?? '');
 
-        if ($user !== false && password_verify($password, (string) $user['password'])) {
-            session_regenerate_id(true);
-            $_SESSION['user_id']    = (int) $user['id'];
-            $_SESSION['user_email'] = (string) $user['email'];
-            $_SESSION['user_name']  = (string) $user['name'];
-            $_SESSION['user_role']  = (string) $user['role'];
-            header('Location: ' . BASE . '/index.php');
-            exit;
+        if ($email === '' || $password === '') {
+            $error = 'Vul alle velden in.';
+        } elseif (($lockedMinutes = loginLockoutMinutesLeft($email)) > 0) {
+            $error = "Te veel mislukte inlogpogingen. Probeer het over $lockedMinutes minuten opnieuw.";
+        } else {
+            $db = getDb();
+            $stmt = $db->prepare('SELECT * FROM esg_users WHERE email = ? LIMIT 1');
+            $stmt->execute([$email]);
+            $user = $stmt->fetch();
+
+            if ($user !== false && password_verify($password, (string) $user['password'])) {
+                clearFailedLogins($email);
+                session_regenerate_id(true);
+                $_SESSION['user_id']    = (int) $user['id'];
+                $_SESSION['user_email'] = (string) $user['email'];
+                $_SESSION['user_name']  = (string) $user['name'];
+                $_SESSION['user_role']  = (string) $user['role'];
+                header('Location: ' . BASE . '/index.php');
+                exit;
+            }
+
+            recordFailedLogin($email);
+            $error = 'Ongeldige inloggegevens.';
         }
-
-        $error = 'Ongeldige inloggegevens.';
     }
 }
 ?>
@@ -83,6 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php endif; ?>
 
         <form method="post" class="space-y-4">
+            <?= csrfField() ?>
             <div>
                 <label for="email" class="block text-sm font-medium text-slate-700 mb-1">E-mailadres</label>
                 <input type="email" name="email" id="email" required autofocus
