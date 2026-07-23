@@ -412,22 +412,46 @@ function seedDemoDataInner(PDO $db): void
 
     // ── Framework-checklists (CSRD / GRI / SASB)
     $checklist = [
-        ['CSRD', 'ESRS E1', 'Klimaatverandering: broeikasgasemissies (scope 1/2/3) gerapporteerd', 'gereed'],
-        ['CSRD', 'ESRS E3', 'Water- en mariene hulpbronnen in kaart gebracht', 'in_uitvoering'],
-        ['CSRD', 'ESRS E5', 'Circulaire economie: afvalstromen en materiaalgebruik', 'in_uitvoering'],
-        ['CSRD', 'ESRS S1', 'Eigen personeel: arbeidsomstandigheden en gelijke behandeling', 'gereed'],
-        ['CSRD', 'ESRS G1', 'Ondernemingsgedrag: anti-corruptiebeleid', 'open'],
+        // CSRD/ESRS — cross-cutting standaarden (ESRS 1 = raamwerk zelf, geen losse
+        // openbaarmakingen; ESRS 2 = verplichte basis voor iedere rapporteur).
+        ['CSRD', 'ESRS 2', 'Algemene informatie: governance, strategie, IRO-management en metrics/targets', 'gereed'],
         ['CSRD', 'Dubbele materialiteitsanalyse', 'Materialiteitsanalyse uitgevoerd en gedocumenteerd', 'gereed'],
+        // CSRD/ESRS — milieu (E1 t/m E5, volledige set)
+        ['CSRD', 'ESRS E1', 'Klimaatverandering: broeikasgasemissies (scope 1/2/3) gerapporteerd', 'gereed'],
+        ['CSRD', 'ESRS E2', 'Vervuiling: emissies naar lucht, water en bodem', 'open'],
+        ['CSRD', 'ESRS E3', 'Water- en mariene hulpbronnen in kaart gebracht', 'in_uitvoering'],
+        ['CSRD', 'ESRS E4', 'Biodiversiteit en ecosystemen: impact en afhankelijkheden', 'open'],
+        ['CSRD', 'ESRS E5', 'Circulaire economie: afvalstromen en materiaalgebruik', 'in_uitvoering'],
+        // CSRD/ESRS — sociaal (S1 t/m S4, volledige set)
+        ['CSRD', 'ESRS S1', 'Eigen personeel: arbeidsomstandigheden en gelijke behandeling', 'gereed'],
+        ['CSRD', 'ESRS S2', 'Werknemers in de waardeketen', 'open'],
+        ['CSRD', 'ESRS S3', 'Getroffen gemeenschappen', 'open'],
+        ['CSRD', 'ESRS S4', 'Consumenten en eindgebruikers', 'in_uitvoering'],
+        // CSRD/ESRS — governance
+        ['CSRD', 'ESRS G1', 'Ondernemingsgedrag: anti-corruptiebeleid', 'open'],
+        // GRI — Universal Standards
+        ['GRI', 'GRI 2', 'Algemene informatie over de organisatie en rapportagepraktijken', 'gereed'],
+        // GRI — 300-serie (milieu)
         ['GRI', 'GRI 302', 'Energieverbruik binnen de organisatie', 'gereed'],
         ['GRI', 'GRI 303', 'Water en effluenten', 'in_uitvoering'],
         ['GRI', 'GRI 305', 'Emissies (scope 1, 2 en 3)', 'gereed'],
+        ['GRI', 'GRI 306', 'Afvalstromen en circulariteit', 'in_uitvoering'],
+        // GRI — 400-serie (sociaal)
         ['GRI', 'GRI 401', 'Werkgelegenheid en personeelsverloop', 'open'],
+        ['GRI', 'GRI 403', 'Gezondheid en veiligheid op het werk', 'in_uitvoering'],
+        ['GRI', 'GRI 404', 'Training en opleiding van medewerkers', 'open'],
         ['GRI', 'GRI 405', 'Diversiteit en gelijke kansen', 'in_uitvoering'],
+        ['GRI', 'GRI 414', 'Sociale beoordeling van leveranciers', 'open'],
         ['GRI', 'GRI 205', 'Anti-corruptiebeleid en -training', 'open'],
+        // SASB — sectorspecifiek (SICS-indeling); onderstaande zijn illustratieve,
+        // veelvoorkomende materiële thema's, geen uitputtende universele lijst
+        // (SASB kent 77 sector-specifieke standaarden, in tegenstelling tot de
+        // one-size-fits-all opzet van CSRD/GRI).
         ['SASB', 'Energiebeheer', 'Sectorspecifieke energie-indicatoren gerapporteerd', 'gereed'],
         ['SASB', 'Personeelsbeheer', 'Materiële arbeidsindicatoren voor de sector', 'in_uitvoering'],
         ['SASB', 'Databeveiliging & privacy', 'Incidentregistratie en mitigatie', 'open'],
         ['SASB', 'Bedrijfsethiek', 'Klokkenluidersregeling gedocumenteerd', 'gereed'],
+        ['SASB', 'Toeleveringsketenbeheer', 'Materialiteitsbeoordeling van leveranciersrisico\'s', 'open'],
     ];
     $stmt2 = $db->prepare('INSERT INTO esg_checklist_items (framework, item_code, item_text, status) VALUES (?, ?, ?, ?)');
     foreach ($checklist as $c) {
