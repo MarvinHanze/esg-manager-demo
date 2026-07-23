@@ -322,6 +322,27 @@ function initDatabase(): void
 function seedDemoData(): void
 {
     $db = getDb();
+
+    // Alles in één transactie: als het reseeden ergens halverwege faalt (bv. een
+    // tijdelijk verbindingsprobleem), wordt alles teruggedraaid in plaats van dat
+    // de demo-tabellen leeg/half gevuld achterblijven. last_reset wordt pas ná
+    // een succesvolle seedDemoData()-aanroep bijgewerkt (zie initDatabase()), dus
+    // een mislukte poging wordt door de volgende request automatisch opnieuw
+    // geprobeerd (zelfde patroon als de tijdregistratie-app).
+    $db->beginTransaction();
+    try {
+        seedDemoDataInner($db);
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
+}
+
+function seedDemoDataInner(PDO $db): void
+{
     $db->exec('DELETE FROM esg_metrics');
     $db->exec('DELETE FROM esg_checklist_items');
     $db->exec('DELETE FROM esg_custom_kpis');
